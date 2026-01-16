@@ -142,19 +142,34 @@ def analyze_food():
 
 # --------------------- WORKOUT PLAN (NEW) ---------------------
 
-WORKOUT_PROMPT = """You are a workout planner.
-Goal: Burn approximately targetCalories kcal for a user with weightKg kg.
+WORKOUT_PROMPT = """
+You are a professional fitness coach.
 
-You will receive a list of candidate exercises with fields: id, name, met.
-Use only exercises from the candidates list.
-Return STRICT JSON ONLY in this schema (no markdown, no extra text):
+Create EXACTLY 4 DIFFERENT workout plans.
+
+Rules:
+- Return 4 plans, no more, no less
+- Each plan must be different
+- Use only exercises from the candidates list
+- Each plan must contain 3 to 6 items
+- Return STRICT JSON ONLY
+- NO markdown
+- NO explanation text
+
+JSON SCHEMA:
 
 {
-  "planTitle": "string",
-  "items": [
-    {"id":"string","minutes": number, "sets": number|null, "reps": number|null, "note":"string"}
+  "plans": [
+    {
+      "planTitle": "string",
+      "items": [
+        {"id":"string","minutes":number,"sets":number|null,"reps":number|null,"note":"string"}
+      ]
+    }
   ]
 }
+"""
+
 
 Rules:
 - 3 to 6 items total.
@@ -247,6 +262,10 @@ def workout_plan():
         result = model.generate_content([WORKOUT_PROMPT, json.dumps(payload)])
         raw = (result.text or "").strip()
         plan_json = safe_json_extract(raw)
+        plans = plan_json.get("plans", [])
+        if not isinstance(plans, list) or len(plans) != 4:
+            raise ValueError("Gemini did not return exactly 4 plans")
+
     except Exception as e:
         plan_json = fallback_plan(targetCalories, weightKg, candidates)
         plan_json["_note"] = f"Gemini unavailable, used fallback. ({str(e)})"
@@ -284,11 +303,10 @@ def workout_plan():
         })
 
         return jsonify({
-        "planTitle": plan_json.get("planTitle") or "AI Workout Plan",
-        "totalMinutes": round(total_minutes, 1),
-        "items": out_items
-    })
-
+    "planTitle": plan_json.get("planTitle") or "AI Workout Plan",
+    "totalMinutes": round(total_minutes, 1),
+    "items": out_items
+})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
