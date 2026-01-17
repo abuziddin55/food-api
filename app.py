@@ -1,5 +1,3 @@
-<<<<<<< HEAD
-<<<<<<< HEAD
 import os
 import re
 import json
@@ -606,4 +604,3 @@ def workout_plan():
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
 
->>>>>>> 6242f5e2ffc48dc7484afce53b2136cbef067637
