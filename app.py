@@ -139,104 +139,65 @@ def analyze_food():
         "parsed": parsed
     })
 
+# --------------------- WORKOUT PLAN (MULTI) ---------------------
 
-# --------------------- WORKOUT PLAN (NEW) ---------------------
+WORKOUT_PROMPT = """
+You are a professional fitness coach.
 
-WORKOUT_PROMPT = """You are a workout planner.
-Goal: Burn approximately targetCalories kcal for a user with weightKg kg.
-
-You will receive a list of candidate exercises with fields: id, name, met.
-Use only exercises from the candidates list.
-Return STRICT JSON ONLY in this schema (no markdown, no extra text):
-
-{
-  "planTitle": "string",
-  "items": [
-    {"id":"string","minutes": number, "sets": number|null, "reps": number|null, "note":"string"}
-  ]
-}
+Create EXACTLY 4 DIFFERENT workout plans.
 
 Rules:
-- 3 to 6 items total.
-- minutes must be between 3 and 20 per item.
-- Prefer a mix: 1-2 strength + 1-2 cardio + optional core.
-- If you are unsure, still output valid JSON.
+- Return 4 plans, no more, no less
+- Each plan must be different
+- Use only exercises from the candidates list
+- Each plan must contain 3 to 6 items
+- minutes must be between 3 and 20
+- Prefer a mix: strength + cardio + optional core
+- Return STRICT JSON ONLY
+- NO markdown
+- NO explanation text
+
+JSON SCHEMA:
+
+{
+  "plans": [
+    {
+      "planTitle": "string",
+      "items": [
+        {"id":"string","minutes":number,"sets":number|null,"reps":number|null,"note":"string"}
+      ]
+    }
+  ]
+}
 """
 
-def kcal_burned(met: float, weightKg: float, minutes: float) -> float:
-    # kcal = MET * weightKg * minutes / 60
-    return (met * weightKg * minutes) / 60.0
-
-def fallback_plan(targetCalories: float, weightKg: float, candidates: List[Dict[str, Any]]):
-    """
-    Gemini yoksa (quota bitti vb.) tamamen local deterministik plan üretir.
-    Yüksek MET'ten başlayıp 3-6 egzersizle hedefe yaklaşır.
-    """
-    cands = [c for c in candidates if float(c.get("met", 0)) > 0]
-    cands.sort(key=lambda x: float(x["met"]), reverse=True)
-
-    items = []
-    remaining = float(targetCalories)
-
-    # 4 item hedefleyelim
-    for c in cands[:10]:
-        if remaining <= 0:
-            break
-        met = float(c["met"])
-        # her item için 6-12 dk arası öner
-        # remaining'e göre dakika hesapla:
-        minutes = (remaining * 60.0) / (met * weightKg)
-        minutes = max(4.0, min(12.0, minutes))
-        burned = kcal_burned(met, weightKg, minutes)
-
-        items.append({
-            "id": c["id"],
-            "minutes": round(minutes, 1),
-            "sets": None,
-            "reps": None,
-            "note": "Auto plan (fallback)."
-        })
-        remaining -= burned
-        if len(items) >= 5:
-            break
-
-    return {
-        "planTitle": "AI Workout Plan",
-        "items": items
-    }
-
 def safe_json_extract(text: str):
-    """
-    Gemini bazen JSON dışı yazarsa içinden JSON'u çekmeye çalışır.
-    """
     t = (text or "").strip()
-    # direkt json ise
     try:
         return json.loads(t)
     except Exception:
         pass
 
-    # ilk { ile son } arası
     start = t.find("{")
     end = t.rfind("}")
     if start != -1 and end != -1 and end > start:
-        chunk = t[start:end+1]
-        return json.loads(chunk)
+        return json.loads(t[start:end + 1])
+
     raise ValueError("Gemini did not return valid JSON")
 
 @app.post("/api/workout_plan")
 def workout_plan():
     data = request.get_json(silent=True) or {}
-    targetCalories = float(data.get("targetCalories", 0) or 0)
-    weightKg = float(data.get("weightKg", 0) or 0)
-    candidates = data.get("candidates", []) or []
+    targetCalories = float(data.get("targetCalories", 0))
+    weightKg = float(data.get("weightKg", 0))
+    candidates = data.get("candidates", [])
 
     if targetCalories <= 0 or weightKg <= 0:
         return jsonify({"error": "targetCalories and weightKg must be > 0"}), 400
-    if not isinstance(candidates, list) or len(candidates) == 0:
+
+    if not candidates:
         return jsonify({"error": "candidates list is required"}), 400
 
-    # Gemini dene, patlarsa fallback
     try:
         model = genai.GenerativeModel("gemini-2.0-flash")
         payload = {
@@ -244,53 +205,61 @@ def workout_plan():
             "weightKg": weightKg,
             "candidates": candidates
         }
-        result = model.generate_content([WORKOUT_PROMPT, json.dumps(payload)])
+
+        result = model.generate_content(
+            [WORKOUT_PROMPT, json.dumps(payload)]
+        )
+
         raw = (result.text or "").strip()
-        plan_json = safe_json_extract(raw)
+        parsed = safe_json_extract(raw)
+        plans = parsed.get("plans", [])
+
+        if not isinstance(plans, list) or len(plans) != 4:
+            raise ValueError("Expected exactly 4 plans")
+
     except Exception as e:
-        plan_json = fallback_plan(targetCalories, weightKg, candidates)
-        plan_json["_note"] = f"Gemini unavailable, used fallback. ({str(e)})"
-
-    # Flutter tarafı item içinde met/name bekliyor → candidates’ten enrich edelim
-    by_id = {c.get("id"): c for c in candidates}
-    out_items = []
-    total_minutes = 0.0
-
-    for it in (plan_json.get("items") or []):
-        ex_id = (it.get("id") or "").strip()
-        minutes = float(it.get("minutes") or 0)
-        if not ex_id or minutes <= 0:
-            continue
-
-        cand = by_id.get(ex_id)
-        if not cand:
-            continue
-
-        met = float(cand.get("met") or 0)
-        name = str(cand.get("name") or ex_id)
-
-        # clamp minutes
-        minutes = max(3.0, min(20.0, minutes))
-        total_minutes += minutes
-
-        out_items.append({
-            "id": ex_id,
-            "name": name,
-            "met": met,
-            "minutes": minutes,
-            "sets": it.get("sets", None),
-            "reps": it.get("reps", None),
-            "note": str(it.get("note") or "")
-        })
-
         return jsonify({
-        "planTitle": plan_json.get("planTitle") or "AI Workout Plan",
-        "totalMinutes": round(total_minutes, 1),
-        "items": out_items
+            "error": "Workout generation failed",
+            "details": str(e)
+        }), 500
+
+    # 🔧 candidates lookup
+    by_id = {c["id"]: c for c in candidates}
+
+    out_plans = []
+
+    for plan in plans:
+        enriched_items = []
+        total_minutes = 0.0
+
+        for it in plan.get("items", []):
+            ex_id = it.get("id")
+            minutes = float(it.get("minutes", 0))
+
+            if not ex_id or minutes <= 0 or ex_id not in by_id:
+                continue
+
+            cand = by_id[ex_id]
+            minutes = max(3.0, min(20.0, minutes))
+            total_minutes += minutes
+
+            enriched_items.append({
+                "id": ex_id,
+                "name": cand.get("name"),
+                "met": cand.get("met"),
+                "minutes": minutes,
+                "sets": it.get("sets"),
+                "reps": it.get("reps"),
+                "note": it.get("note", "")
+            })
+
+        if enriched_items:
+            out_plans.append({
+                "planTitle": plan.get("planTitle", "AI Workout Plan"),
+                "totalMinutes": round(total_minutes, 1),
+                "items": enriched_items
+            })
+
+    return jsonify({
+        "plans": out_plans
     })
-
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
-
